@@ -383,9 +383,69 @@ var freeCodeCampBasicJSChallengeIDS = []string{
 	"587d7b7e367417b2b2512b24",
 	"587d7b7e367417b2b2512b21",
 }
+var freeCodeCampReactChallengeIDS = []string{
+	"587d7dbc367417b2b2512bb1",
+	"5a24bbe0dba28a8d3cbd4c5d",
+	"5a24bbe0dba28a8d3cbd4c5e",
+	"5a24bbe0dba28a8d3cbd4c5f",
+	"5a24c314108439a4d4036160",
+	"5a24c314108439a4d4036161",
+	"5a24c314108439a4d4036162",
+	"5a24c314108439a4d4036163",
+	"5a24c314108439a4d4036164",
+	"5a24c314108439a4d4036165",
+	"5a24c314108439a4d4036166",
+	"5a24c314108439a4d4036167",
+	"5a24c314108439a4d4036168",
+	"5a24c314108439a4d4036169",
+	"5a24c314108439a4d403616a",
+	"5a24c314108439a4d403616b",
+	"5a24c314108439a4d403616c",
+	"5a24c314108439a4d403616d",
+	"5a24c314108439a4d403616e",
+	"5a24c314108439a4d403616f",
+	"5a24c314108439a4d4036170",
+	"5a24c314108439a4d4036171",
+	"5a24c314108439a4d4036172",
+	"5a24c314108439a4d4036173",
+	"5a24c314108439a4d4036174",
+	"5a24c314108439a4d4036176",
+	"5a24c314108439a4d4036177",
+	"5a24c314108439a4d4036178",
+	"5a24c314108439a4d4036179",
+	"5a24c314108439a4d403617a",
+	"5a24c314108439a4d403617b",
+	"5a24c314108439a4d403617c",
+	"5a24c314108439a4d403617d",
+	"5a24c314108439a4d403617e",
+	"5a24c314108439a4d403617f",
+	"5a24c314108439a4d4036180",
+	"5a24c314108439a4d4036181",
+	"5a24c314108439a4d4036182",
+	"5a24c314108439a4d4036183",
+	"5a24c314108439a4d4036184",
+	"5a24c314108439a4d4036185",
+	"5a24c314108439a4d4036187",
+	"5a24c314108439a4d4036188",
+	"5a24c314108439a4d4036189",
+	"5a24c314108439a4d403618a",
+	"5a24c314108439a4d403618b",
+	"5a24c314108439a4d403618c",
+	"5a24c314108439a4d403618d",
+}
+
+func countChallengesCompleted(body string, challenges []string) int {
+	challengesCompleted := 0
+	for _, challengeID := range challenges {
+		if strings.Contains(body, challengeID) {
+			challengesCompleted++
+		}
+	}
+	return challengesCompleted
+}
 
 func gradeFreeCodeCampProfile(profileURL string) (float64, string, error) {
-	msg := fmt.Sprintf("You completed freecodecamp Basic JavaScript")
+	msg := fmt.Sprintf("You completed freecodecamp Basic JavaScript or React")
 	doReturn := func(credit float64, err error) (float64, string, error) {
 		return credit, msg, err
 	}
@@ -398,12 +458,15 @@ func gradeFreeCodeCampProfile(profileURL string) (float64, string, error) {
 	apiURL := "https://www.freecodecamp.org/api/users/get-public-profile?username=" + userID
 
 	body, err := fetch(apiURL)
-	challengesCompleted := 0
-	for _, challengeID := range freeCodeCampBasicJSChallengeIDS {
-		if strings.Contains(body, challengeID) {
-			challengesCompleted++
+	maxScore := 0.
+	challengeSets := [][]string{freeCodeCampBasicJSChallengeIDS, freeCodeCampReactChallengeIDS}
+	for _, challengeSet := range challengeSets {
+		challengesCompleted := countChallengesCompleted(body, challengeSet)
+		score := float64(challengesCompleted) / float64(len(challengeSet))
+		if score > maxScore {
+			maxScore = score
 		}
 	}
-	score := float64(challengesCompleted) / float64(len(freeCodeCampBasicJSChallengeIDS))
-	return score, msg, nil
+
+	return maxScore, msg, nil
 }
