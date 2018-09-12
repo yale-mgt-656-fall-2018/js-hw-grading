@@ -7,7 +7,8 @@ COPY main.go main.go
 COPY grading grading
 COPY vendor vendor
 
-RUN apk update && apk add ca-certificates && rm -rf /var/cache/apk/*
+RUN apk --no-cache add ca-certificates
+# RUN apk update && apk add ca-certificates && rm -rf /var/cache/apk/*
 
 # build the source
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main && chmod a+x main
@@ -19,4 +20,4 @@ WORKDIR /root
 # copy the binary from builder
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /go/src/github.com/yale-mgt-656-fall-2018/js-hw-grading/main /root
-CMD ["/root/main"]
+ENTRYPOINT ["/root/main"]
