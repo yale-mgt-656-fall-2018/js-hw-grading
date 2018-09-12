@@ -2,28 +2,38 @@ package grading
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
-	"math/rand"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-
 	"golang.org/x/net/html"
 )
 
-type serverQuestion func(string, string) (bool, string, error)
+type jsCodingSiteInfo struct {
+	name       string
+	domains    []string
+	gradingFuc func(string) (float64, string, error)
+}
+
+var jsCodingSites = []jsCodingSiteInfo{
+	{"FreeCodeCamp", []string{"www.freecodecamp.org"}, gradeFreeCodeCampProfile},
+	{"CodeAcademy", []string{"www.codeacademy.com"}, gradeCodeAcademyProfile},
+}
+
 type responseTester func(*http.Response) (bool, error)
 
 func statusText(pass bool) string {
 	if pass {
-		return "✅ PASS"
+		return "✅"
 	}
-	return "❌ FAIL"
+	return "❌"
 }
 
 // TestAll ...
@@ -33,29 +43,54 @@ func TestAll(rawURL string, showOutput bool) (int, int, error) {
 			fmt.Println(args...)
 		}
 	}
+	maxScore := 60
 	numPass := 0
-	numFail := 0
-	parsedURL, err := url.Parse(rawURL)
-	if err != nil {
-		return numPass, numFail, err
-	}
-
-	questions := []serverQuestion{
-		indexIsUp,
-		movieList,
-		movieSearch,
-		movieDetail,
-	}
-	for _, question := range questions {
-		passed, questionText, err2 := question(parsedURL.Scheme, parsedURL.Host)
-		doLog(statusText(passed && (err2 == nil)), "-", questionText)
-		if passed {
-			numPass++
-		} else {
-			numFail++
+	numFail := maxScore
+	incrementScore := func(val int) {
+		numPass += val
+		numFail -= val
+		if numFail < 0 {
+			numFail = 0
+		}
+		if numPass > maxScore {
+			numPass = maxScore
 		}
 	}
-	return numPass, numFail, err
+
+	// Give a few points if the URL submitted is valid and the site is up.
+	//
+	profileOKMaxScore := 5
+	isValidSite, site, err := urlIsValidProfile(rawURL)
+	isOnline := false
+	if isValidSite && err == nil {
+		isOnline, err = profileIsUp(rawURL)
+	}
+	profileOK := isOnline && isValidSite && err == nil
+	profileOKscore := 0
+	if profileOK {
+		profileOKscore = 5
+	}
+	profileIsValidAndOnlineMsg := fmt.Sprintf("Profile is valid and online at %s (%d/%d pts)", rawURL, profileOKscore, profileOKMaxScore)
+	doLog(statusText(profileOK), "-", profileIsValidAndOnlineMsg)
+	if !profileOK {
+		return numPass, numFail, nil
+	}
+	incrementScore(profileOKscore)
+
+	// Score the assignment
+	//
+	fractionCompleted, fractionCompletedMsg, err := site.gradingFuc(rawURL)
+	points := int(math.Round((fractionCompleted * float64(numFail))))
+	emoji := statusText(false)
+	if fractionCompleted == 1.0 {
+		emoji = statusText(true)
+	} else if fractionCompleted > 0 {
+		emoji = "🔶"
+	}
+	fractionCompletedMsg += fmt.Sprintf(" (%d/%d pts)", points, numFail)
+	doLog(emoji, "-", fractionCompletedMsg)
+	incrementScore(points)
+	return numPass, numFail, nil
 }
 
 func newClient() *http.Client {
@@ -65,14 +100,14 @@ func newClient() *http.Client {
 	return netClient
 }
 
-func testStatusEquals(response *http.Response, err error, questionText string, expectedStatus int) (bool, string, error) {
+func testStatusEquals(response *http.Response, err error, expectedStatus int) (bool, error) {
 	if err != nil {
-		return false, questionText, err
+		return false, err
 	}
 	if response.StatusCode == expectedStatus {
-		return true, questionText, nil
+		return true, nil
 	}
-	return false, questionText, nil
+	return false, nil
 }
 
 func readResponseBody(response *http.Response) (string, error) {
@@ -84,57 +119,74 @@ func readResponseBody(response *http.Response) (string, error) {
 	return bodyString, err
 }
 
-func testBodyEquals(response *http.Response, err error, questionText string, expectedBody string) (bool, string, error) {
+func testBodyEquals(response *http.Response, err error, expectedBody string) (bool, error) {
 	if err != nil {
-		return false, questionText, err
+		return false, err
 	}
 	dump, err2 := readResponseBody(response)
 	if err2 != nil {
-		return false, questionText, err
+		return false, err
 	}
 	body := strings.Trim(string(dump), " ")
 	if body == expectedBody {
-		return true, questionText, nil
+		return true, nil
 	}
-	return false, questionText, nil
+	return false, nil
 }
 
-func testResponse(response *http.Response, err error, questionText string, testFunc responseTester) (bool, string, error) {
+func testResponse(response *http.Response, err error, testFunc responseTester) (bool, error) {
 	if err != nil {
-		return false, questionText, nil
+		return false, nil
 	}
 	result, err := testFunc(response)
 	if result && err == nil {
-		return true, questionText, nil
+		return true, nil
 	}
-	return false, questionText, nil
+	return false, nil
 }
 
-func getAndCheckFunction(scheme string, host string, urlPath string, query url.Values, questionText string, testFunc responseTester) (bool, string, error) {
+func getAndCheckFunction(scheme string, host string, urlPath string, query url.Values, testFunc responseTester) (bool, error) {
 	parsedURL := url.URL{
 		Scheme:   scheme,
 		Host:     host,
 		Path:     urlPath,
 		RawQuery: query.Encode(),
 	}
-	netClient := newClient()
-	response, err := netClient.Get(parsedURL.String())
-	return testResponse(response, err, questionText, testFunc)
+	return getAndCheckFunctionForURL(parsedURL.String(), testFunc)
 }
 
-func getAndCheckStatus(scheme string, host string, urlPath string, query url.Values, questionText string, expectedStatus int) (bool, string, error) {
+func getAndCheckFunctionForURL(theURL string, testFunc responseTester) (bool, error) {
+	netClient := newClient()
+	response, err := netClient.Get(theURL)
+	return testResponse(response, err, testFunc)
+}
+
+func fetch(theURL string) (string, error) {
+	netClient := newClient()
+	response, err := netClient.Get(theURL)
+	if err != nil {
+		return "", err
+	}
+	return readResponseBody(response)
+}
+
+func getAndCheckStatusForURL(theURL string, expectedStatus int) (bool, error) {
+	netClient := newClient()
+	response, err := netClient.Get(theURL)
+	return testStatusEquals(response, err, expectedStatus)
+}
+
+func getAndCheckStatus(scheme string, host string, urlPath string, query url.Values, expectedStatus int) (bool, error) {
 	parsedURL := url.URL{
 		Scheme:   scheme,
 		Host:     host,
 		Path:     urlPath,
 		RawQuery: query.Encode(),
 	}
-	netClient := newClient()
-	response, err := netClient.Get(parsedURL.String())
-	return testStatusEquals(response, err, questionText, expectedStatus)
+	return getAndCheckStatusForURL(parsedURL.String(), expectedStatus)
 }
 
-func getAndCheckBody(scheme string, host string, urlPath string, query url.Values, questionText string, expectedBody string) (bool, string, error) {
+func getAndCheckBody(scheme string, host string, urlPath string, query url.Values, expectedBody string) (bool, error) {
 	testFunc := func(response *http.Response) (bool, error) {
 		body, err := readResponseBody(response)
 		if err != nil {
@@ -150,18 +202,35 @@ func getAndCheckBody(scheme string, host string, urlPath string, query url.Value
 		host,
 		urlPath,
 		query,
-		questionText,
 		testFunc,
 	)
 }
 
-func indexIsUp(scheme string, baseURL string) (bool, string, error) {
-	return getAndCheckStatus(
-		scheme,
-		baseURL,
-		"/movies",
-		url.Values{},
-		"Your return a 200 status code at /movies",
+func stringSliceContains(s []string, e string) bool {
+	for _, a := range s {
+		if a == e {
+			return true
+		}
+	}
+	return false
+}
+
+func urlIsValidProfile(theURL string) (bool, jsCodingSiteInfo, error) {
+	parsedURL, err := url.Parse(theURL)
+	if err != nil {
+		return false, jsCodingSiteInfo{}, err
+	}
+	for _, site := range jsCodingSites {
+		if stringSliceContains(site.domains, parsedURL.Host) {
+			return true, site, nil
+		}
+	}
+	return false, jsCodingSiteInfo{}, nil
+}
+
+func profileIsUp(theURL string) (bool, error) {
+	return getAndCheckStatusForURL(
+		theURL,
 		http.StatusOK,
 	)
 }
@@ -174,102 +243,167 @@ func debugHTML(n *html.Node) {
 	fmt.Println(buf.String())
 }
 
-func getMovieCountChecker(numberOfMoviesExpected int) func(*http.Response) (bool, error) {
-	hasMovies := func(response *http.Response) (bool, error) {
-		doc, err := goquery.NewDocumentFromReader(response.Body)
-		if err != nil {
-			return false, err
-		}
-		elCount := doc.Find("tr.movie").Length()
-		if elCount == numberOfMoviesExpected {
-			return true, nil
-		}
-		return false, nil
+func gradeCodeAcademyProfile(profileURL string) (float64, string, error) {
+	doReturn := func(credit float64, err error) (float64, string, error) {
+		msg := fmt.Sprintf("You should have completed code academy")
+		return credit, msg, err
 	}
-	return hasMovies
+	netClient := newClient()
+	response, err := netClient.Get(profileURL)
+	if err != nil {
+		log.Println(err)
+		return doReturn(0, err)
+	}
+	doc, err := goquery.NewDocumentFromReader(response.Body)
+	if err != nil {
+		log.Println(err)
+		return doReturn(0, errors.New("Error parsing your document"))
+	}
+	log.Println("woot")
+	challengeElements := doc.Find("a[href*=\"/challenges/\"]")
+	challengeElements.Each(func(i int, s *goquery.Selection) {
+		log.Println(s.Text())
+		// // For each item found, get the band and title
+		// band := s.Find("a").Text()
+		// title := s.Find("i").Text()
+		// fmt.Printf("Review %d: %s - %s\n", i, band, title)
+	})
+	return doReturn(0., nil)
 }
 
-func movieDetail(scheme string, baseURL string) (bool, string, error) {
-	orderedMovies := []string{"Spider-Man 2",
-		"Titanic",
-		"Troy",
-		"Terminator 3: Rise of the Machines",
-		"Waterworld",
-		"Wild Wild West",
-		"Van Helsing",
-		"Alexander",
-		"Master and Commander: The Far Side of the World",
-		"Polar Express, The",
-		"Tarzan",
-		"Die Another Day"}
-	s := rand.NewSource(time.Now().Unix())
-	r := rand.New(s) // initialize local pseudorandom generator
-	idx := r.Intn(len(orderedMovies))
+// The Basic JavaScript challenges are here:
+// https://github.com/P1xt/fcc-is-forked/blob/master/src/app/services/challenges/data/02-javascript-algorithms-and-data-structures/basic-javascript.json
 
-	hasMovieTitle := func(response *http.Response) (bool, error) {
-		doc, err := goquery.NewDocumentFromReader(response.Body)
-		if err != nil {
-			return false, err
-		}
-		selector := fmt.Sprintf("h1")
-		if strings.Contains(doc.Find(selector).Text(), orderedMovies[idx]) {
-			return true, nil
-		}
-		return false, nil
-	}
-
-	return getAndCheckFunction(
-		scheme,
-		baseURL,
-		fmt.Sprintf("/movies/%d", idx+1),
-		url.Values{},
-		fmt.Sprintf("The URL /movies/%d has an h1 with content \"%s\"", idx, orderedMovies[idx]),
-		hasMovieTitle,
-	)
+var freeCodeCampBasicJSChallengeIDS = []string{
+	"bd7123c9c441eddfaeb4bdef",
+	"bd7123c9c443eddfaeb5bdef",
+	"56533eb9ac21ba0edf2244a8",
+	"56533eb9ac21ba0edf2244a9",
+	"56533eb9ac21ba0edf2244aa",
+	"56533eb9ac21ba0edf2244ab",
+	"cf1111c1c11feddfaeb3bdef",
+	"cf1111c1c11feddfaeb4bdef",
+	"cf1231c1c11feddfaeb5bdef",
+	"cf1111c1c11feddfaeb6bdef",
+	"56533eb9ac21ba0edf2244ac",
+	"56533eb9ac21ba0edf2244ad",
+	"cf1391c1c11feddfaeb4bdef",
+	"bd7993c9c69feddfaeb7bdef",
+	"bd7993c9ca9feddfaeb7bdef",
+	"56533eb9ac21ba0edf2244ae",
+	"56533eb9ac21ba0edf2244af",
+	"56533eb9ac21ba0edf2244b0",
+	"56533eb9ac21ba0edf2244b1",
+	"56533eb9ac21ba0edf2244b2",
+	"bd7123c9c444eddfaeb5bdef",
+	"56533eb9ac21ba0edf2244b5",
+	"56533eb9ac21ba0edf2244b4",
+	"56533eb9ac21ba0edf2244b6",
+	"56533eb9ac21ba0edf2244b7",
+	"56533eb9ac21ba0edf2244b8",
+	"56533eb9ac21ba0edf2244b9",
+	"56533eb9ac21ba0edf2244ed",
+	"bd7123c9c448eddfaeb5bdef",
+	"bd7123c9c549eddfaeb5bdef",
+	"56533eb9ac21ba0edf2244ba",
+	"bd7123c9c450eddfaeb5bdef",
+	"bd7123c9c451eddfaeb5bdef",
+	"bd7123c9c452eddfaeb5bdef",
+	"56533eb9ac21ba0edf2244bb",
+	"bd7993c9c69feddfaeb8bdef",
+	"cf1111c1c11feddfaeb7bdef",
+	"56bbb991ad1ed5201cd392ca",
+	"cf1111c1c11feddfaeb8bdef",
+	"56592a60ddddeae28f7aa8e1",
+	"56bbb991ad1ed5201cd392cb",
+	"56bbb991ad1ed5201cd392cc",
+	"56bbb991ad1ed5201cd392cd",
+	"56bbb991ad1ed5201cd392ce",
+	"56533eb9ac21ba0edf2244bc",
+	"56bbb991ad1ed5201cd392cf",
+	"56533eb9ac21ba0edf2244bd",
+	"56533eb9ac21ba0edf2244be",
+	"56533eb9ac21ba0edf2244bf",
+	"56533eb9ac21ba0edf2244c0",
+	"56533eb9ac21ba0edf2244c2",
+	"598e8944f009e646fc236146",
+	"56533eb9ac21ba0edf2244c3",
+	"56533eb9ac21ba0edf2244c6",
+	"bd7123c9c441eddfaeb5bdef",
+	"cf1111c1c12feddfaeb3bdef",
+	"56533eb9ac21ba0edf2244d0",
+	"56533eb9ac21ba0edf2244d1",
+	"599a789b454f2bbd91a3ff4d",
+	"56533eb9ac21ba0edf2244d2",
+	"56533eb9ac21ba0edf2244d3",
+	"56533eb9ac21ba0edf2244d4",
+	"56533eb9ac21ba0edf2244d5",
+	"56533eb9ac21ba0edf2244d6",
+	"56533eb9ac21ba0edf2244d7",
+	"56533eb9ac21ba0edf2244d8",
+	"56533eb9ac21ba0edf2244d9",
+	"56533eb9ac21ba0edf2244da",
+	"56533eb9ac21ba0edf2244db",
+	"5690307fddb111c6084545d7",
+	"56533eb9ac21ba0edf2244dc",
+	"5664820f61c48e80c9fa476c",
+	"56533eb9ac21ba0edf2244dd",
+	"56533eb9ac21ba0edf2244de",
+	"56533eb9ac21ba0edf2244df",
+	"56533eb9ac21ba0edf2244e0",
+	"5679ceb97cbaa8c51670a16b",
+	"56533eb9ac21ba0edf2244c4",
+	"565bbe00e9cc8ac0725390f4",
+	"56bbb991ad1ed5201cd392d0",
+	"56533eb9ac21ba0edf2244c7",
+	"56533eb9ac21ba0edf2244c8",
+	"56533eb9ac21ba0edf2244c9",
+	"56bbb991ad1ed5201cd392d1",
+	"56bbb991ad1ed5201cd392d2",
+	"56bbb991ad1ed5201cd392d3",
+	"56533eb9ac21ba0edf2244ca",
+	"567af2437cbaa8c51670a16c",
+	"56533eb9ac21ba0edf2244cb",
+	"56533eb9ac21ba0edf2244cc",
+	"56533eb9ac21ba0edf2244cd",
+	"56533eb9ac21ba0edf2244cf",
+	"cf1111c1c11feddfaeb1bdef",
+	"cf1111c1c11feddfaeb5bdef",
+	"56104e9e514f539506016a5c",
+	"56105e7b514f539506016a5e",
+	"5675e877dbd60be8ad28edc6",
+	"56533eb9ac21ba0edf2244e1",
+	"5a2efd662fb457916e1fe604",
+	"5688e62ea601b2482ff8422b",
+	"cf1111c1c11feddfaeb9bdef",
+	"cf1111c1c12feddfaeb1bdef",
+	"cf1111c1c12feddfaeb2bdef",
+	"587d7b7e367417b2b2512b23",
+	"587d7b7e367417b2b2512b22",
+	"587d7b7e367417b2b2512b24",
+	"587d7b7e367417b2b2512b21",
 }
 
-func movieList(scheme string, baseURL string) (bool, string, error) {
-	numExpected := 499
-
-	return getAndCheckFunction(
-		scheme,
-		baseURL,
-		"/movies",
-		url.Values{},
-		fmt.Sprintf("There are %d movies (tr.movie) at /movies", numExpected),
-		getMovieCountChecker(numExpected),
-	)
-}
-
-func movieSearch(scheme string, baseURL string) (bool, string, error) {
-	type ps struct {
-		titleQuery    string
-		expectedCount int
+func gradeFreeCodeCampProfile(profileURL string) (float64, string, error) {
+	msg := fmt.Sprintf("You completed freecodecamp Basic JavaScript")
+	doReturn := func(credit float64, err error) (float64, string, error) {
+		return credit, msg, err
 	}
-	possibleSearches := []ps{
-		ps{"Spider", 2},
-		ps{"The", 148},
-		ps{"last", 5},
-		ps{"little", 5},
-		ps{"no", 9},
-		ps{"two", 3},
-		ps{"III", 4},
+
+	parsedURL, err := url.Parse(profileURL)
+	if err != nil {
+		return doReturn(0, err)
 	}
-	s := rand.NewSource(time.Now().Unix())
-	r := rand.New(s) // initialize local pseudorandom generator
-	idx := r.Intn(len(possibleSearches))
-	selected := possibleSearches[idx]
-	query := url.Values{}
+	userID := strings.Trim(parsedURL.Path, "/")
+	apiURL := "https://www.freecodecamp.org/api/users/get-public-profile?username=" + userID
 
-	query.Set("title", selected.titleQuery)
-
-	return getAndCheckFunction(
-		scheme,
-		baseURL,
-		fmt.Sprintf("/movies"),
-		query,
-		fmt.Sprintf("There are %d movies when searching for \"%s\" (no quotes)",
-			selected.expectedCount, selected.titleQuery),
-		getMovieCountChecker(selected.expectedCount),
-	)
+	body, err := fetch(apiURL)
+	challengesCompleted := 0
+	for _, challengeID := range freeCodeCampBasicJSChallengeIDS {
+		if strings.Contains(body, challengeID) {
+			challengesCompleted++
+		}
+	}
+	score := float64(challengesCompleted) / float64(len(freeCodeCampBasicJSChallengeIDS))
+	return score, msg, nil
 }
