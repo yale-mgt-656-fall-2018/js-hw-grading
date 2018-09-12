@@ -1,13 +1,16 @@
 package main
 
 import (
-	"fmt"
+	"log"
+	"os"
 
 	"github.com/yale-mgt-656-fall-2018/js-hw-grading/grading"
 )
 
 func main() {
-	fmt.Println("hello world")
-	url := "https://www.freecodecamp.org/fccc861a26c-236c-480a-9ada-ca754f20c767"
-	grading.TestAll(url, true)
+	if len(os.Args) != 2 {
+		log.Println("Error. You must supply a profile URL.")
+		return
+	}
+	grading.TestAll(os.Args[1], true)
 }
