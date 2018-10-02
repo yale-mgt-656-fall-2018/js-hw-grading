@@ -24,7 +24,7 @@ type jsCodingSiteInfo struct {
 
 var jsCodingSites = []jsCodingSiteInfo{
 	{"FreeCodeCamp", []string{"www.freecodecamp.org"}, gradeFreeCodeCampProfile},
-	{"CodeAcademy", []string{"www.codeacademy.com"}, gradeCodeAcademyProfile},
+	{"CodeAcademy", []string{"www.codecademy.com"}, gradeCodeAcademyProfile},
 }
 
 type responseTester func(*http.Response) (bool, error)
@@ -259,15 +259,10 @@ func gradeCodeAcademyProfile(profileURL string) (float64, string, error) {
 		log.Println(err)
 		return doReturn(0, errors.New("Error parsing your document"))
 	}
-	log.Println("woot")
-	challengeElements := doc.Find("a[href*=\"/challenges/\"]")
-	challengeElements.Each(func(i int, s *goquery.Selection) {
-		log.Println(s.Text())
-		// // For each item found, get the band and title
-		// band := s.Find("a").Text()
-		// title := s.Find("i").Text()
-		// fmt.Printf("Review %d: %s - %s\n", i, band, title)
-	})
+	selector := "article#completed a[href*=\"introduction-to-javascript\"]"
+	if doc.Find(selector).Length() > 0 {
+		return doReturn(1., nil)
+	}
 	return doReturn(0., nil)
 }
 
