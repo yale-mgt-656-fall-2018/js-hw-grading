@@ -259,9 +259,15 @@ func gradeCodeAcademyProfile(profileURL string) (float64, string, error) {
 		log.Println(err)
 		return doReturn(0, errors.New("Error parsing your document"))
 	}
-	selector := "article#completed a[href*=\"introduction-to-javascript\"]"
-	if doc.Find(selector).Length() > 0 {
-		return doReturn(1., nil)
+	klasses := []string{
+		"introduction-to-javascript",
+		"react-101",
+	}
+	for _, kls := range klasses {
+		selector := "article#completed a[href*=\"" + kls + "\"]"
+		if doc.Find(selector).Length() > 0 {
+			return doReturn(1., nil)
+		}
 	}
 	return doReturn(0., nil)
 }
